@@ -1,17 +1,17 @@
-# Detecting Behavior: Token Manipulation Hunt
-The purpose of this repository is to share a well-working example of detecting Token-manipulation/duplication behavior by correlating identity transitions, process access, and the resulting privileged process.<br> <br>
+# Detecting Behavior *Meaning*: Token Manipulation Hunt
+The purpose of this repository is to share a field-tested, working example of detecting Token-manipulation/duplication behavior by correlating identity transitions, process access, and the resulting privileged process.<br> <br>
 The detection does not rely on a specific executable name. Instead, it reconstructs the relationship between the process that accessed a privileged token donor, the donor process, and the new SYSTEM process.<br><br>
 Repository includes local detection script (PowerShell-based) and Entra detection KQL (for Log Analytics workspace/Microsoft Sentinel hunting view), yet can easily convert the correlation logic to any SIEM/detection platform.
 
 ## Why this is important
-In order to evolve from basic TTPs to Modern Hunting, we need to understand not only behavior but *meaning* of what we see in the evidence.<br>
-We Do Not build this hunt around executable names. Or even executables at all. It is Built around relationships and security-context changes, e.g.<br>
+In order to evolve from basic TTPs to Modern Hunting, we need to understand not only behavior but *meaning* of what we see in the evidence.<br><br>
+We Do Not build this hunt around executable names. Or even executables at all. It is Built around relationships and security-context changes, e.g.<br><br>
 identity transition<br>
         + process access<br>
         + token-donor relationship<br>
         + privileged child<br>
         + temporal correlation<br><br>
-This makes the detection more resilient to different utilities, scripting languages, donor processes, and token-manipulation implementations.<br>
+This makes the detection more resilient to different utilities, scripting languages, donor processes, and token-manipulation implementations (Direct Parent-Child, In-Direct Token donor, Direct without Process Acccess, etc.)<br><br>
 
 ## Telemetry requirements 
 | Telemetry | Purpose |
