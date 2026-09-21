@@ -31,6 +31,13 @@ New process runs as NT AUTHORITY\SYSTEM<br>
         -> Sysmon Event ID 1 + Security Event ID 4688 (enrichment only) + 4703 (Optional enrichment)<br>
 Correlation hunt with false-positive suppression using a Local PowerShell script and/or KQL for Microsoft Sentinel/Log Analytics<br>
 
+## Why Confidence Score matters - True-Positives vs. False-Positives
+The following query hunt examples highlights why the logic built into the queries in this repository, aligned with the Confidence Score, gives you better results in identifying highly susupicious vs. potentially benign day-to-day Identity transitions:<br>
+* Have a look at these results, coming back from a 7 days-back query:<br>
+<img src="/screenshots/screenshot kql hunt.png" alt="Sample hunt" style="width:90%; height:auto;"><br><br>
+* Notice the real token manipulation evidence, performed with multiple techniques & tactics, generating high score, while benign identity transitions are detected yet with lower confidence scores.<br>You can use this to filter out benign/legitimate entires:<br><br>
+<img src="/screenshots/screenshot kql hunt-highlighted.png" alt="Sample highlighted hunt" style="width:90%; height:auto;"><br>
+  
 ## Useful References
 To get Sysmon, and learn more about Sysmon Configurations, Sentinel & data collection in Entra -
 - [Get Sysmon from Sysinternals](https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon)
