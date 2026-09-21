@@ -1,0 +1,974 @@
+// Hunt for Token Manipulation, correlating behavior meaning, not process names. supress false-positives from service operations.
+// v1.0 (1nTh35h311)
+// Get more info @ https://github.com/YossiSassi/Token-Manipulation-Hunt
+let Lookback = 2h;
+let AccessWindow = 120s;
+
+// ============================================================
+// SYSMON EVENT ID 1
+// Process creation
+// ============================================================
+
+let SysmonProcessCreate =
+Event
+| where TimeGenerated > ago(Lookback)
+| where Source == "Microsoft-Windows-Sysmon"
+| where EventID == 1
+| extend
+    ProcessGuid =
+        extract(@'Name="ProcessGuid">([^<]+)', 1, EventData),
+
+    ProcessId =
+        tolong(
+            extract(@'Name="ProcessId">([^<]+)', 1, EventData)
+        ),
+
+    Image =
+        extract(@'Name="Image">([^<]+)', 1, EventData),
+
+    CommandLine =
+        extract(@'Name="CommandLine">([^<]+)', 1, EventData),
+
+    User =
+        extract(@'Name="User">([^<]+)', 1, EventData),
+
+    IntegrityLevel =
+        extract(@'Name="IntegrityLevel">([^<]+)', 1, EventData),
+
+    ParentProcessGuid =
+        extract(@'Name="ParentProcessGuid">([^<]+)', 1, EventData),
+
+    ParentProcessId =
+        tolong(
+            extract(@'Name="ParentProcessId">([^<]+)', 1, EventData)
+        ),
+
+    ParentImage =
+        extract(@'Name="ParentImage">([^<]+)', 1, EventData),
+
+    ParentCommandLine =
+        extract(@'Name="ParentCommandLine">([^<]+)', 1, EventData),
+
+    ParentUser =
+        extract(@'Name="ParentUser">([^<]+)', 1, EventData)
+| extend
+    ProcessPidHex = tolower(tohex(ProcessId))
+| project
+    Computer,
+    SysmonCreateTime = TimeGenerated,
+    ProcessGuid,
+    ProcessId,
+    ProcessPidHex,
+    Image,
+    CommandLine,
+    User,
+    IntegrityLevel,
+    ParentProcessGuid,
+    ParentProcessId,
+    ParentImage,
+    ParentCommandLine,
+    ParentUser;
+
+
+// ============================================================
+// SYSMON EVENT ID 10
+//
+// Source = process doing the access
+// Target = possible SYSTEM token donor
+// ============================================================
+
+let SysmonProcessAccessRaw =
+Event
+| where TimeGenerated > ago(Lookback)
+| where Source == "Microsoft-Windows-Sysmon"
+| where EventID == 10
+| extend
+    SourceProcessGuid =
+        extract(@'Name="SourceProcessGUID">([^<]+)', 1, EventData),
+
+    SourceProcessId =
+        tolong(
+            extract(@'Name="SourceProcessId">([^<]+)', 1, EventData)
+        ),
+
+    SourceImage =
+        extract(@'Name="SourceImage">([^<]+)', 1, EventData),
+
+    SourceUser =
+        extract(@'Name="SourceUser">([^<]+)', 1, EventData),
+
+    TargetProcessGuid =
+        extract(@'Name="TargetProcessGUID">([^<]+)', 1, EventData),
+
+    TargetProcessId =
+        tolong(
+            extract(@'Name="TargetProcessId">([^<]+)', 1, EventData)
+        ),
+
+    TargetImage =
+        extract(@'Name="TargetImage">([^<]+)', 1, EventData),
+
+    TargetUser =
+        extract(@'Name="TargetUser">([^<]+)', 1, EventData),
+
+    GrantedAccess =
+        extract(@'Name="GrantedAccess">([^<]+)', 1, EventData),
+
+    CallTrace =
+        extract(@'Name="CallTrace">([^<]+)', 1, EventData)
+| project
+    Computer,
+    AccessTime = TimeGenerated,
+    SourceProcessGuid,
+    SourceProcessId,
+    SourceImage,
+    SourceUser,
+    TargetProcessGuid,
+    TargetProcessId,
+    TargetImage,
+    TargetUser,
+    GrantedAccess,
+    CallTrace;
+
+
+// ============================================================
+// ENRICH EID 10 SOURCE
+//
+// Resolve SourceProcessGuid back to EID 1 so we get reliable:
+//
+//     image
+//     user
+//     command line
+// ============================================================
+
+let SysmonProcessAccess =
+SysmonProcessAccessRaw
+| extend SourceLookupGuid = SourceProcessGuid
+| join kind=leftouter (
+    SysmonProcessCreate
+    | project
+        Computer,
+        SourceLookupGuid = ProcessGuid,
+        SourceCreateTime = SysmonCreateTime,
+        SourceCreatePID = ProcessId,
+        SourceCreateImage = Image,
+        SourceCreateUser = User,
+        SourceCreateCommandLine = CommandLine
+)
+on Computer, SourceLookupGuid
+| where
+    isnull(SourceCreateTime)
+    or SourceCreateTime <= AccessTime
+| extend
+    EffectiveSourceImage =
+        coalesce(SourceCreateImage, SourceImage),
+
+    EffectiveSourceUser =
+        coalesce(SourceCreateUser, SourceUser),
+
+    EffectiveSourceCommandLine =
+        SourceCreateCommandLine
+| project
+    Computer,
+    AccessTime,
+    SourceProcessGuid,
+    SourceProcessId,
+    EffectiveSourceImage,
+    EffectiveSourceUser,
+    EffectiveSourceCommandLine,
+    TargetProcessGuid,
+    TargetProcessId,
+    TargetImage,
+    TargetUser,
+    GrantedAccess,
+    CallTrace;
+
+
+// ============================================================
+// SECURITY EVENT 4688
+//
+// ENRICHMENT ONLY.
+//
+// It is intentionally NOT the starting point because direct
+// parent token manipulation may be easier to reconstruct from
+// Sysmon than from 4688 creator/target semantics.
+// ============================================================
+
+let Security4688 =
+SecurityEvent
+| where TimeGenerated > ago(Lookback)
+| where EventID == 4688
+| extend
+    ChildPidHex =
+        replace_regex(
+            replace_string(
+                tolower(tostring(NewProcessId)),
+                "0x",
+                ""
+            ),
+            @"^0+",
+            ""
+        )
+| extend
+    SecCreatorUser = case(
+        isempty(SubjectUserName) or SubjectUserName == "-",
+            "",
+        isempty(SubjectDomainName) or SubjectDomainName == "-",
+            SubjectUserName,
+        strcat(SubjectDomainName, "\\", SubjectUserName)
+    ),
+    SecTargetUser = case(
+        isempty(TargetUserName) or TargetUserName == "-",
+            "",
+        isempty(TargetDomainName) or TargetDomainName == "-",
+            TargetUserName,
+        strcat(TargetDomainName, "\\", TargetUserName)
+    )
+| project
+    Computer,
+    SecCreateTime = TimeGenerated,
+    ChildPidHex,
+    SecCreatorPID = ProcessId,
+    SecCreatorImage = ParentProcessName,
+    SecCreatorUser,
+    SecCreatorSID = SubjectUserSid,
+    SecTargetUser,
+    SecTargetSID = TargetUserSid;
+
+
+// ============================================================
+// START FROM PRIVILEGED CHILD
+//
+// This is the major detection change.
+//
+// Find processes that are independently observed by Sysmon as:
+//
+//     NT AUTHORITY\SYSTEM
+//     Integrity = System
+//
+// ============================================================
+
+let SystemChildren =
+SysmonProcessCreate
+| where IntegrityLevel =~ "System"
+| where
+    User =~ @"NT AUTHORITY\SYSTEM"
+    or User endswith @"\SYSTEM"
+| project
+    Computer,
+    ChildTime = SysmonCreateTime,
+    ChildProcessGuid = ProcessGuid,
+    ChildProcessId = ProcessId,
+    ChildPidHex = ProcessPidHex,
+    ChildImage = Image,
+    ChildCommandLine = CommandLine,
+    ChildUser = User,
+    ChildIntegrity = IntegrityLevel,
+    ChildParentGuid = ParentProcessGuid,
+    ChildParentPID = ParentProcessId,
+    ChildParentImage = ParentImage,
+    ChildParentCommandLine = ParentCommandLine,
+    ChildParentUser = ParentUser;
+
+
+// ============================================================
+// RESOLVE CHILD'S DIRECT PARENT
+//
+// PID is used as the primary correlation because some token
+// creation cases produce a zero/empty ParentProcessGuid.
+//
+// We choose the most recent instance of that PID before the
+// SYSTEM child was created.
+// ============================================================
+
+let DirectParentContext =
+SystemChildren
+| extend JoinParentPID = ChildParentPID
+| join kind=inner (
+    SysmonProcessCreate
+    | project
+        Computer,
+        JoinParentPID = ProcessId,
+
+        DirectParentCreateTime = SysmonCreateTime,
+        DirectParentGuid = ProcessGuid,
+        DirectParentPID = ProcessId,
+        DirectParentImage = Image,
+        DirectParentCommandLine = CommandLine,
+        DirectParentUser = User
+)
+on Computer, JoinParentPID
+| extend
+    ParentAgeSeconds =
+        datetime_diff(
+            "second",
+            ChildTime,
+            DirectParentCreateTime
+        )
+| where ParentAgeSeconds >= 0
+| summarize
+    arg_min(ParentAgeSeconds, *)
+    by Computer, ChildProcessGuid
+| where isnotempty(DirectParentUser)
+
+//
+// Parent must be a non-service identity.
+//
+| where DirectParentUser !~ @"NT AUTHORITY\SYSTEM"
+| where DirectParentUser !~ @"NT AUTHORITY\LOCAL SERVICE"
+| where DirectParentUser !~ @"NT AUTHORITY\NETWORK SERVICE";
+
+
+// ============================================================
+// CASE A
+//
+// DIRECT PARENT MANIPULATION
+//
+//       PowerShell (user)
+//              │
+//              ├──── EID10 ───> winlogon (SYSTEM)
+//              │
+//              └──────────────> cmd.exe (SYSTEM)
+//
+// Child.ParentPID == ManipulatorPID
+// ============================================================
+
+let DirectParentCases =
+DirectParentContext
+| extend JoinManipulatorPID = DirectParentPID
+| join kind=inner (
+    SysmonProcessAccess
+    | project
+        Computer,
+        JoinManipulatorPID = SourceProcessId,
+
+        AccessTime,
+
+        AccessSourceGuid = SourceProcessGuid,
+        AccessSourcePID = SourceProcessId,
+        AccessSourceImage = EffectiveSourceImage,
+        AccessSourceUser = EffectiveSourceUser,
+        AccessSourceCommandLine =
+            EffectiveSourceCommandLine,
+
+        TokenSourcePID = TargetProcessId,
+        TokenSourceGuid = TargetProcessGuid,
+        TokenSourceImage = TargetImage,
+        TokenSourceUser = TargetUser,
+
+        GrantedAccess,
+        CallTrace
+)
+on Computer, JoinManipulatorPID
+
+//
+// Access must occur immediately before the SYSTEM child.
+//
+| where
+    AccessTime >= ChildTime - AccessWindow
+    and AccessTime <= ChildTime + 5s
+
+//
+// Event 10 source must actually be the direct parent.
+//
+| where AccessSourcePID == DirectParentPID
+
+//
+// Source identity must correspond to the parent identity.
+//
+| where
+    isempty(AccessSourceUser)
+    or AccessSourceUser =~ DirectParentUser
+
+//
+// Token donor must be a SYSTEM process.
+//
+| where
+    TokenSourceUser =~ @"NT AUTHORITY\SYSTEM"
+    or TokenSourceUser endswith @"\SYSTEM"
+
+//
+// Donor cannot be the manipulator itself.
+//
+| where TokenSourcePID != DirectParentPID
+
+| extend
+    AccessDeltaSeconds =
+        abs(
+            datetime_diff(
+                "second",
+                ChildTime,
+                AccessTime
+            )
+        )
+
+//
+// A process may access several SYSTEM processes.
+// Keep the closest access before the child.
+//
+| summarize
+    arg_min(AccessDeltaSeconds, *)
+    by Computer, ChildProcessGuid
+
+| extend
+    Relationship =
+        "Direct Parent-Child Token Manipulation",
+
+    ConfidenceScore = 90,
+
+    ManipulatorPID =
+        tostring(DirectParentPID),
+
+    ManipulatorImage =
+        DirectParentImage,
+
+    ManipulatorUser =
+        DirectParentUser,
+
+    ManipulatorCommandLine =
+        DirectParentCommandLine,
+
+    ManipulatorProcessGuid =
+        DirectParentGuid,
+
+    ReportedParentPID =
+        tostring(ChildParentPID),
+
+    ReportedParentImage =
+        ChildParentImage,
+
+    ReportedParentGuid =
+        ChildParentGuid
+
+| project
+    Computer,
+    ChildTime,
+    ChildProcessGuid,
+    ChildPidHex,
+    ChildProcessId,
+    ChildImage,
+    ChildCommandLine,
+    ChildUser,
+    ChildIntegrity,
+
+    Relationship,
+    ConfidenceScore,
+
+    ManipulatorPID,
+    ManipulatorImage,
+    ManipulatorUser,
+    ManipulatorCommandLine,
+    ManipulatorProcessGuid,
+
+    TokenSourcePID = tostring(TokenSourcePID),
+    TokenSourceImage,
+    TokenSourceUser,
+    TokenSourceGuid,
+    GrantedAccess,
+    AccessTime,
+
+    ReportedParentPID,
+    ReportedParentImage,
+    ReportedParentGuid;
+
+
+// ============================================================
+// CASE B
+//
+// TOKEN DONOR REPORTED AS CHILD PARENT
+//
+// PowerShell (user)
+//       │
+//       └──── EID10 ───> winlogon (SYSTEM donor)
+//                              │
+//                              └────> cmd.exe SYSTEM
+//
+// Child.ParentPID == Event10.TargetPID
+// ============================================================
+
+let DonorParentCases =
+SystemChildren
+| extend JoinDonorPID = ChildParentPID
+| join kind=inner (
+    SysmonProcessAccess
+    | project
+        Computer,
+        JoinDonorPID = TargetProcessId,
+
+        AccessTime,
+
+        ManipulatorPIDRaw = SourceProcessId,
+        ManipulatorGuidRaw = SourceProcessGuid,
+        ManipulatorImageRaw = EffectiveSourceImage,
+        ManipulatorUserRaw = EffectiveSourceUser,
+        ManipulatorCommandLineRaw =
+            EffectiveSourceCommandLine,
+
+        TokenSourcePIDRaw = TargetProcessId,
+        TokenSourceGuidRaw = TargetProcessGuid,
+        TokenSourceImageRaw = TargetImage,
+        TokenSourceUserRaw = TargetUser,
+
+        GrantedAccess,
+        CallTrace
+)
+on Computer, JoinDonorPID
+
+| where
+    AccessTime >= ChildTime - AccessWindow
+    and AccessTime <= ChildTime + 5s
+
+//
+// Token donor should be SYSTEM.
+//
+| where
+    TokenSourceUserRaw =~ @"NT AUTHORITY\SYSTEM"
+    or TokenSourceUserRaw endswith @"\SYSTEM"
+
+//
+// Manipulator should NOT be a built-in service identity.
+//
+| where ManipulatorUserRaw !~ @"NT AUTHORITY\SYSTEM"
+| where ManipulatorUserRaw !~ @"NT AUTHORITY\LOCAL SERVICE"
+| where ManipulatorUserRaw !~ @"NT AUTHORITY\NETWORK SERVICE"
+
+| where
+    ManipulatorPIDRaw !=
+        TokenSourcePIDRaw
+
+| extend
+    AccessDeltaSeconds =
+        abs(
+            datetime_diff(
+                "second",
+                ChildTime,
+                AccessTime
+            )
+        )
+
+| summarize
+    arg_min(AccessDeltaSeconds, *)
+    by Computer, ChildProcessGuid
+
+| extend
+    Relationship =
+        "Token Donor Reported As Child Parent",
+
+    ConfidenceScore = 90,
+
+    ManipulatorPID =
+        tostring(ManipulatorPIDRaw),
+
+    ManipulatorImage =
+        ManipulatorImageRaw,
+
+    ManipulatorUser =
+        ManipulatorUserRaw,
+
+    ManipulatorCommandLine =
+        ManipulatorCommandLineRaw,
+
+    ManipulatorProcessGuid =
+        ManipulatorGuidRaw,
+
+    TokenSourcePID =
+        tostring(TokenSourcePIDRaw),
+
+    TokenSourceImage =
+        TokenSourceImageRaw,
+
+    TokenSourceUser =
+        TokenSourceUserRaw,
+
+    TokenSourceGuid =
+        TokenSourceGuidRaw,
+
+    ReportedParentPID =
+        tostring(ChildParentPID),
+
+    ReportedParentImage =
+        ChildParentImage,
+
+    ReportedParentGuid =
+        ChildParentGuid
+
+| project
+    Computer,
+    ChildTime,
+    ChildProcessGuid,
+    ChildPidHex,
+    ChildProcessId,
+    ChildImage,
+    ChildCommandLine,
+    ChildUser,
+    ChildIntegrity,
+
+    Relationship,
+    ConfidenceScore,
+
+    ManipulatorPID,
+    ManipulatorImage,
+    ManipulatorUser,
+    ManipulatorCommandLine,
+    ManipulatorProcessGuid,
+
+    TokenSourcePID,
+    TokenSourceImage,
+    TokenSourceUser,
+    TokenSourceGuid,
+    GrantedAccess,
+    AccessTime,
+
+    ReportedParentPID,
+    ReportedParentImage,
+    ReportedParentGuid;
+
+
+// ============================================================
+// CASE C
+//
+// DIRECT PARENT FALLBACK
+//
+// Useful when Sysmon Event 10 was filtered / unavailable.
+//
+// user process
+//      │
+//      └────> SYSTEM child
+//
+// This is lower confidence.
+// ============================================================
+
+let DirectParentFallback =
+DirectParentContext
+| extend
+    Relationship =
+        "Direct Parent-Child SYSTEM Identity Transition",
+
+    ConfidenceScore = 50,
+
+    ManipulatorPID =
+        tostring(DirectParentPID),
+
+    ManipulatorImage =
+        DirectParentImage,
+
+    ManipulatorUser =
+        DirectParentUser,
+
+    ManipulatorCommandLine =
+        DirectParentCommandLine,
+
+    ManipulatorProcessGuid =
+        DirectParentGuid,
+
+    TokenSourcePID =
+        "",
+
+    TokenSourceImage =
+        "",
+
+    TokenSourceUser =
+        "",
+
+    TokenSourceGuid =
+        "",
+
+    GrantedAccess =
+        "",
+
+    AccessTime =
+        datetime(null),
+
+    ReportedParentPID =
+        tostring(ChildParentPID),
+
+    ReportedParentImage =
+        ChildParentImage,
+
+    ReportedParentGuid =
+        ChildParentGuid
+
+| project
+    Computer,
+    ChildTime,
+    ChildProcessGuid,
+    ChildPidHex,
+    ChildProcessId,
+    ChildImage,
+    ChildCommandLine,
+    ChildUser,
+    ChildIntegrity,
+
+    Relationship,
+    ConfidenceScore,
+
+    ManipulatorPID,
+    ManipulatorImage,
+    ManipulatorUser,
+    ManipulatorCommandLine,
+    ManipulatorProcessGuid,
+
+    TokenSourcePID,
+    TokenSourceImage,
+    TokenSourceUser,
+    TokenSourceGuid,
+    GrantedAccess,
+    AccessTime,
+
+    ReportedParentPID,
+    ReportedParentImage,
+    ReportedParentGuid;
+
+
+// ============================================================
+// COMBINE ALL THREE DETECTION PATHS
+//
+// If the same child matches more than one path, keep the
+// strongest interpretation.
+// ============================================================
+
+let CoreCases =
+union
+    DirectParentCases,
+    DonorParentCases,
+    DirectParentFallback;
+
+let BestCoreCase =
+CoreCases
+| summarize
+    arg_max(ConfidenceScore, *)
+    by Computer, ChildProcessGuid;
+
+
+// ============================================================
+// ENRICH WITH SECURITY 4688
+//
+// 4688 is supporting evidence, not a mandatory requirement.
+// ============================================================
+
+BestCoreCase
+| join kind=leftouter (
+    Security4688
+)
+on Computer, ChildPidHex
+
+//
+// PID reuse can produce multiple 4688 candidates.
+// Keep the event closest in time to Sysmon EID 1.
+//
+| extend
+    Security4688Delta =
+        iff(
+            isnull(SecCreateTime),
+            999999,
+            abs(
+                datetime_diff(
+                    "second",
+                    ChildTime,
+                    SecCreateTime
+                )
+            )
+        )
+
+| summarize
+    arg_min(Security4688Delta, *)
+    by Computer, ChildProcessGuid
+
+| extend
+    HasMatching4688 =
+        Security4688Delta <= 10,
+
+    Security4688SupportsTransition =
+        Security4688Delta <= 10
+        and SecTargetSID == "S-1-5-18"
+        and SecCreatorSID !in (
+            "S-1-5-18",
+            "S-1-5-19",
+            "S-1-5-20"
+        )
+
+
+//
+// Add a small confidence bonus when Security 4688 independently
+// confirms the user -> SYSTEM identity transition.
+//
+| extend
+    ConfidenceScore =
+        ConfidenceScore
+        + iff(
+            Security4688SupportsTransition,
+            10,
+            0
+        )
+
+| extend
+    ConfidenceScore =
+        iff(
+            ConfidenceScore > 100,
+            100,
+            ConfidenceScore
+        )
+
+
+// ============================================================
+// USER-REQUESTED THRESHOLD
+// ============================================================
+
+| where ConfidenceScore >= 50
+
+
+// ============================================================
+// FINAL DETECTION DESCRIPTION
+// ============================================================
+
+| extend
+    DetectionReasons =
+        case(
+
+            Relationship ==
+                "Direct Parent-Child Token Manipulation",
+
+                strcat(
+                    "SYSTEM child has direct non-service parent ",
+                    ManipulatorImage,
+                    " PID ",
+                    ManipulatorPID,
+                    "; same parent accessed SYSTEM token donor ",
+                    TokenSourceImage,
+                    " PID ",
+                    TokenSourcePID,
+                    " shortly before child creation"
+                ),
+
+            Relationship ==
+                "Token Donor Reported As Child Parent",
+
+                strcat(
+                    "Non-service process ",
+                    ManipulatorImage,
+                    " PID ",
+                    ManipulatorPID,
+                    " accessed SYSTEM token donor ",
+                    TokenSourceImage,
+                    " PID ",
+                    TokenSourcePID,
+                    "; resulting SYSTEM process reports donor PID as parent"
+                ),
+
+            strcat(
+                "SYSTEM child was created directly by non-service process ",
+                ManipulatorImage,
+                " PID ",
+                ManipulatorPID,
+                "; no matching token-donor Event 10 was available"
+            )
+        )
+
+
+// ============================================================
+// FINAL RESULT
+// ============================================================
+
+| project
+    Time = ChildTime,
+    Computer,
+    ConfidenceScore,
+    Relationship,
+
+    // Suspected manipulator
+
+    ManipulatorPID,
+    ManipulatorImage,
+    ManipulatorUser,
+    ManipulatorCommandLine,
+    ManipulatorProcessGuid,
+
+    // Token donor
+
+    TokenSourcePID,
+    TokenSourceImage,
+    TokenSourceUser,
+    TokenSourceProcessGuid = TokenSourceGuid,
+    GrantedAccess,
+    AccessTime,
+
+    // Resulting privileged process
+
+    NewProcessPID =
+        ChildProcessId,
+
+    NewProcessImage =
+        ChildImage,
+
+    NewProcessCommandLine =
+        ChildCommandLine,
+
+    NewProcessUser =
+        ChildUser,
+
+    NewProcessIntegrity =
+        ChildIntegrity,
+
+    NewProcessGuid =
+        ChildProcessGuid,
+
+    // Actual Sysmon parent
+
+    ReportedParentPID,
+    ReportedParentImage,
+    ReportedParentGuid,
+
+    // Security 4688 enrichment
+
+    Security4688Matched =
+        HasMatching4688,
+
+    Security4688SupportsTransition,
+
+    Security4688CreatorPID =
+        iff(
+            HasMatching4688,
+            tostring(SecCreatorPID),
+            ""
+        ),
+
+    Security4688CreatorImage =
+        iff(
+            HasMatching4688,
+            SecCreatorImage,
+            ""
+        ),
+
+    Security4688CreatorUser =
+        iff(
+            HasMatching4688,
+            SecCreatorUser,
+            ""
+        ),
+
+    Security4688CreatorSID =
+        iff(
+            HasMatching4688,
+            SecCreatorSID,
+            ""
+        ),
+
+    Security4688TargetUser =
+        iff(
+            HasMatching4688,
+            SecTargetUser,
+            ""
+        ),
+
+    Security4688TargetSID =
+        iff(
+            HasMatching4688,
+            SecTargetSID,
+            ""
+        ),
+
+    DetectionReasons
+
+| order by
+    ConfidenceScore desc,
+    Time desc
