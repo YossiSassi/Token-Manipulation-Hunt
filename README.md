@@ -1,7 +1,8 @@
 # Detecting Behavior *Meaning*: Token Manipulation Hunt
 The purpose of this repository is to share a field-tested, working example of detecting Token-manipulation/duplication behavior by correlating identity transitions, process access, and the resulting privileged process.<br> <br>
 The detection does not rely on a specific executable name. Instead, it reconstructs the relationship between the process that accessed a privileged token donor, the donor process, and the new SYSTEM process.<br><br>
-Repository includes local detection script (PowerShell-based) and Entra detection KQL (for Log Analytics workspace/Microsoft Sentinel hunting view), yet can easily convert the correlation logic to any SIEM/detection platform.
+Repository includes local detection script (PowerShell-based), Entra detection KQL (for Log Analytics workspace/Microsoft Sentinel hunting view) and Splunk*, yet should be fairly easy to convert & test the correlation logic in any other SIEM/detection platform.
+* Note: Splunk SPL hunt converted with good guidance using AI, yet with little testing so far in large production environments - comments & improvements are welcome.
 
 ## Why this is important
 In order to evolve from basic TTPs to Modern Hunting, we need to understand not only behavior but *meaning* of what we see in the evidence.<br><br>
