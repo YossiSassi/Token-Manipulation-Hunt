@@ -1,0 +1,1519 @@
+```Comments: 1. Note the search window - can schedule this correlation every 5 minutes, search approximately 15 minutes of telemetry for correlation context, and keep this line:
+| where ChildTime>=relative_time(now(), "-5m@m")
+That means the search can look backward far enough to find the preceding EID 10 access and late-arriving events while only generating detections for SYSTEM children created during the current alert interval. If your Splunk ingestion latency routinely exceeds five minutes, increase both the context window and alert window appropriately..
+2. For alert suppression, use the resulting process GUID as the primary deduplication identifier: Computer + NewProcessGuid, rather than PID alone. This prevents the same child from generating repeat notables during overlapping scheduled-search windows and avoids PID-reuse ambiguity.
+3. One further production optimization would be to move the process metadata into the Splunk Endpoint.Processes data model / accelerated summaries while retaining raw Sysmon Event 10 for ProcessAccess correlation. That substantially reduces the Event ID 1 workload on large environments without weakening this behavioral logic.```
+
+index=windows earliest=-15m@m latest=now
+(
+    (
+        sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+        (EventCode=1 OR EventCode=10)
+    )
+    OR
+    (
+        sourcetype="XmlWinEventLog:Security"
+        EventCode=4688
+    )
+)
+
+| eval Computer=coalesce(Computer, ComputerName, host)
+| eval EID=tonumber(EventCode)
+
+| eval IsSysmon1=if(
+        sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+        AND EID=1,
+        1,
+        0
+    )
+
+| eval IsSysmon10=if(
+        sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+        AND EID=10,
+        1,
+        0
+    )
+
+| eval IsSecurity4688=if(
+        sourcetype="XmlWinEventLog:Security"
+        AND EID=4688,
+        1,
+        0
+    )
+
+
+| eval ProcGuid=if(
+        IsSysmon1=1,
+        coalesce(ProcessGuid, ProcessGUID),
+        null()
+    )
+
+| eval ProcPID=if(
+        IsSysmon1=1,
+        tonumber(ProcessId),
+        null()
+    )
+
+| eval ProcImage=if(
+        IsSysmon1=1,
+        Image,
+        null()
+    )
+
+| eval ProcCommandLine=if(
+        IsSysmon1=1,
+        CommandLine,
+        null()
+    )
+
+| eval ProcUser=if(
+        IsSysmon1=1,
+        User,
+        null()
+    )
+
+| eval ProcIntegrity=if(
+        IsSysmon1=1,
+        IntegrityLevel,
+        null()
+    )
+
+| eval ParentGuid=if(
+        IsSysmon1=1,
+        coalesce(ParentProcessGuid, ParentProcessGUID),
+        null()
+    )
+
+| eval ParentPID=if(
+        IsSysmon1=1,
+        tonumber(ParentProcessId),
+        null()
+    )
+
+| eval ParentImageValue=if(
+        IsSysmon1=1,
+        ParentImage,
+        null()
+    )
+
+| eval ParentCommandLineValue=if(
+        IsSysmon1=1,
+        ParentCommandLine,
+        null()
+    )
+
+| eval ParentUserValue=if(
+        IsSysmon1=1,
+        ParentUser,
+        null()
+    )
+
+
+| eval SrcGuid=if(
+        IsSysmon10=1,
+        coalesce(SourceProcessGuid, SourceProcessGUID),
+        null()
+    )
+
+| eval SrcPID=if(
+        IsSysmon10=1,
+        tonumber(SourceProcessId),
+        null()
+    )
+
+| eval SrcImage=if(
+        IsSysmon10=1,
+        SourceImage,
+        null()
+    )
+
+| eval SrcUser=if(
+        IsSysmon10=1,
+        SourceUser,
+        null()
+    )
+
+| eval TgtGuid=if(
+        IsSysmon10=1,
+        coalesce(TargetProcessGuid, TargetProcessGUID),
+        null()
+    )
+
+| eval TgtPID=if(
+        IsSysmon10=1,
+        tonumber(TargetProcessId),
+        null()
+    )
+
+| eval TgtImage=if(
+        IsSysmon10=1,
+        TargetImage,
+        null()
+    )
+
+| eval TgtUser=if(
+        IsSysmon10=1,
+        TargetUser,
+        null()
+    )
+
+| eval AccessGranted=if(
+        IsSysmon10=1,
+        GrantedAccess,
+        null()
+    )
+
+| eval AccessCallTrace=if(
+        IsSysmon10=1,
+        CallTrace,
+        null()
+    )
+
+
+| eval SecNewPIDRaw=if(
+        IsSecurity4688=1,
+        coalesce(NewProcessId, New_Process_ID),
+        null()
+    )
+
+| eval SecNewPID=if(
+        match(SecNewPIDRaw, "(?i)^0x"),
+        tonumber(
+            replace(SecNewPIDRaw, "(?i)^0x", ""),
+            16
+        ),
+        tonumber(SecNewPIDRaw)
+    )
+
+| eval SecCreatorPIDRaw=if(
+        IsSecurity4688=1,
+        coalesce(
+            ProcessId,
+            CreatorProcessId,
+            Creator_Process_ID
+        ),
+        null()
+    )
+
+| eval SecCreatorPID=if(
+        match(SecCreatorPIDRaw, "(?i)^0x"),
+        tonumber(
+            replace(SecCreatorPIDRaw, "(?i)^0x", ""),
+            16
+        ),
+        tonumber(SecCreatorPIDRaw)
+    )
+
+| eval SecCreatorSID=if(
+        IsSecurity4688=1,
+        coalesce(SubjectUserSid, Subject_User_SID),
+        null()
+    )
+
+| eval SecCreatorName=if(
+        IsSecurity4688=1,
+        coalesce(SubjectUserName, Subject_User_Name),
+        null()
+    )
+
+| eval SecCreatorDomain=if(
+        IsSecurity4688=1,
+        coalesce(SubjectDomainName, Subject_Domain_Name),
+        null()
+    )
+
+| eval SecTargetSID=if(
+        IsSecurity4688=1,
+        coalesce(TargetUserSid, Target_User_SID),
+        null()
+    )
+
+| eval SecTargetName=if(
+        IsSecurity4688=1,
+        coalesce(TargetUserName, Target_User_Name),
+        null()
+    )
+
+| eval SecTargetDomain=if(
+        IsSecurity4688=1,
+        coalesce(TargetDomainName, Target_Domain_Name),
+        null()
+    )
+
+| eval SecCreatorImage=if(
+        IsSecurity4688=1,
+        coalesce(ParentProcessName, Creator_Process_Name),
+        null()
+    )
+
+| eval SecCreatorUser=if(
+        IsSecurity4688=1,
+        case(
+            isnull(SecCreatorName) OR SecCreatorName="",
+                null(),
+
+            isnull(SecCreatorDomain)
+                OR SecCreatorDomain=""
+                OR SecCreatorDomain="-",
+                SecCreatorName,
+
+            true(),
+                SecCreatorDomain . "\\" . SecCreatorName
+        ),
+        null()
+    )
+
+| eval SecTargetUser=if(
+        IsSecurity4688=1,
+        case(
+            isnull(SecTargetName) OR SecTargetName="",
+                null(),
+
+            isnull(SecTargetDomain)
+                OR SecTargetDomain=""
+                OR SecTargetDomain="-",
+                SecTargetName,
+
+            true(),
+                SecTargetDomain . "\\" . SecTargetName
+        ),
+        null()
+    )
+
+
+| eval ProcGuidValid=if(
+        isnotnull(ProcGuid)
+        AND ProcGuid!=""
+        AND NOT match(
+            ProcGuid,
+            "(?i)^\\{?00000000-0000-0000-0000-000000000000\\}?$"
+        ),
+        1,
+        0
+    )
+
+| eval ParentGuidValid=if(
+        isnotnull(ParentGuid)
+        AND ParentGuid!=""
+        AND NOT match(
+            ParentGuid,
+            "(?i)^\\{?00000000-0000-0000-0000-000000000000\\}?$"
+        ),
+        1,
+        0
+    )
+
+| eval SrcGuidValid=if(
+        isnotnull(SrcGuid)
+        AND SrcGuid!=""
+        AND NOT match(
+            SrcGuid,
+            "(?i)^\\{?00000000-0000-0000-0000-000000000000\\}?$"
+        ),
+        1,
+        0
+    )
+
+| eval TgtGuidValid=if(
+        isnotnull(TgtGuid)
+        AND TgtGuid!=""
+        AND NOT match(
+            TgtGuid,
+            "(?i)^\\{?00000000-0000-0000-0000-000000000000\\}?$"
+        ),
+        1,
+        0
+    )
+
+
+| eval SelfKey=if(
+        ProcGuidValid=1,
+        "GUID:" . lower(ProcGuid),
+        if(
+            isnotnull(ProcPID),
+            "PID:" . tostring(ProcPID),
+            null()
+        )
+    )
+
+| eval ParentKey=if(
+        ParentGuidValid=1,
+        "GUID:" . lower(ParentGuid),
+        if(
+            isnotnull(ParentPID),
+            "PID:" . tostring(ParentPID),
+            null()
+        )
+    )
+
+| eval SourceKey=if(
+        SrcGuidValid=1,
+        "GUID:" . lower(SrcGuid),
+        if(
+            isnotnull(SrcPID),
+            "PID:" . tostring(SrcPID),
+            null()
+        )
+    )
+
+| eval TargetKey=if(
+        TgtGuidValid=1,
+        "GUID:" . lower(TgtGuid),
+        if(
+            isnotnull(TgtPID),
+            "PID:" . tostring(TgtPID),
+            null()
+        )
+    )
+
+
+| eval Role=case(
+        IsSysmon1=1,
+            mvappend("self", "childref"),
+
+        IsSysmon10=1,
+            mvappend("access_source", "access_target"),
+
+        IsSecurity4688=1,
+            "sec4688"
+    )
+
+| mvexpand Role
+
+
+| eval EntityKey=case(
+        Role="self",
+            SelfKey,
+
+        Role="childref",
+            ParentKey,
+
+        Role="access_source",
+            SourceKey,
+
+        Role="access_target",
+            TargetKey,
+
+        Role="sec4688",
+            "SEC:" . tostring(SecNewPID) . ":" . tostring(_time)
+    )
+
+
+| eval SourceLookupKey=case(
+        Role="self",
+            SelfKey,
+
+        Role="access_source" OR Role="access_target",
+            SourceKey
+    )
+
+| eval TargetLookupKey=case(
+        Role="self",
+            SelfKey,
+
+        Role="access_source" OR Role="access_target",
+            TargetKey
+    )
+
+
+| eventstats
+    latest(
+        eval(
+            if(
+                Role="self",
+                ProcImage,
+                null()
+            )
+        )
+    ) AS SourceCatalogImage
+
+    latest(
+        eval(
+            if(
+                Role="self",
+                ProcUser,
+                null()
+            )
+        )
+    ) AS SourceCatalogUser
+
+    latest(
+        eval(
+            if(
+                Role="self",
+                ProcCommandLine,
+                null()
+            )
+        )
+    ) AS SourceCatalogCommandLine
+
+    latest(
+        eval(
+            if(
+                Role="self",
+                ProcGuid,
+                null()
+            )
+        )
+    ) AS SourceCatalogGuid
+
+    BY Computer SourceLookupKey
+
+
+| eventstats
+    latest(
+        eval(
+            if(
+                Role="self",
+                ProcImage,
+                null()
+            )
+        )
+    ) AS TargetCatalogImage
+
+    latest(
+        eval(
+            if(
+                Role="self",
+                ProcUser,
+                null()
+            )
+        )
+    ) AS TargetCatalogUser
+
+    latest(
+        eval(
+            if(
+                Role="self",
+                ProcGuid,
+                null()
+            )
+        )
+    ) AS TargetCatalogGuid
+
+    BY Computer TargetLookupKey
+
+
+| eval EffectiveSrcImage=coalesce(
+        SourceCatalogImage,
+        SrcImage
+    )
+
+| eval EffectiveSrcUser=coalesce(
+        SourceCatalogUser,
+        SrcUser
+    )
+
+| eval EffectiveSrcCommandLine=SourceCatalogCommandLine
+
+| eval EffectiveTgtImage=coalesce(
+        TargetCatalogImage,
+        TgtImage
+    )
+
+| eval EffectiveTgtUser=coalesce(
+        TargetCatalogUser,
+        TgtUser
+    )
+
+| eval EffectiveTgtGuid=coalesce(
+        TargetCatalogGuid,
+        TgtGuid
+    )
+
+
+| eval SelfTime=if(
+        Role="self",
+        _time,
+        null()
+    )
+
+| eval SelfPID=if(
+        Role="self",
+        ProcPID,
+        null()
+    )
+
+| eval SelfGuid=if(
+        Role="self",
+        ProcGuid,
+        null()
+    )
+
+| eval SelfImage=if(
+        Role="self",
+        ProcImage,
+        null()
+    )
+
+| eval SelfUser=if(
+        Role="self",
+        ProcUser,
+        null()
+    )
+
+| eval SelfCommandLine=if(
+        Role="self",
+        ProcCommandLine,
+        null()
+    )
+
+
+| eval ChildTime=if(
+        Role="childref",
+        _time,
+        null()
+    )
+
+| eval ChildPID=if(
+        Role="childref",
+        ProcPID,
+        null()
+    )
+
+| eval ChildGuid=if(
+        Role="childref",
+        ProcGuid,
+        null()
+    )
+
+| eval ChildImage=if(
+        Role="childref",
+        ProcImage,
+        null()
+    )
+
+| eval ChildCommandLine=if(
+        Role="childref",
+        ProcCommandLine,
+        null()
+    )
+
+| eval ChildUser=if(
+        Role="childref",
+        ProcUser,
+        null()
+    )
+
+| eval ChildIntegrity=if(
+        Role="childref",
+        ProcIntegrity,
+        null()
+    )
+
+| eval ChildParentPID=if(
+        Role="childref",
+        ParentPID,
+        null()
+    )
+
+| eval ChildParentGuid=if(
+        Role="childref",
+        ParentGuid,
+        null()
+    )
+
+| eval ChildParentImage=if(
+        Role="childref",
+        ParentImageValue,
+        null()
+    )
+
+| eval ChildParentCommandLine=if(
+        Role="childref",
+        ParentCommandLineValue,
+        null()
+    )
+
+| eval ChildParentUser=if(
+        Role="childref",
+        ParentUserValue,
+        null()
+    )
+
+
+| eval SourceAccessTime=if(
+        Role="access_source",
+        _time,
+        null()
+    )
+
+| eval SourceAccessSourcePID=if(
+        Role="access_source",
+        SrcPID,
+        null()
+    )
+
+| eval SourceAccessSourceGuid=if(
+        Role="access_source",
+        SrcGuid,
+        null()
+    )
+
+| eval SourceAccessSourceImage=if(
+        Role="access_source",
+        EffectiveSrcImage,
+        null()
+    )
+
+| eval SourceAccessSourceUser=if(
+        Role="access_source",
+        EffectiveSrcUser,
+        null()
+    )
+
+| eval SourceAccessSourceCommandLine=if(
+        Role="access_source",
+        EffectiveSrcCommandLine,
+        null()
+    )
+
+| eval SourceAccessTargetPID=if(
+        Role="access_source",
+        TgtPID,
+        null()
+    )
+
+| eval SourceAccessTargetGuid=if(
+        Role="access_source",
+        EffectiveTgtGuid,
+        null()
+    )
+
+| eval SourceAccessTargetImage=if(
+        Role="access_source",
+        EffectiveTgtImage,
+        null()
+    )
+
+| eval SourceAccessTargetUser=if(
+        Role="access_source",
+        EffectiveTgtUser,
+        null()
+    )
+
+| eval SourceAccessGranted=if(
+        Role="access_source",
+        AccessGranted,
+        null()
+    )
+
+| eval SourceAccessCallTrace=if(
+        Role="access_source",
+        AccessCallTrace,
+        null()
+    )
+
+
+| eval TargetAccessTime=if(
+        Role="access_target",
+        _time,
+        null()
+    )
+
+| eval TargetAccessSourcePID=if(
+        Role="access_target",
+        SrcPID,
+        null()
+    )
+
+| eval TargetAccessSourceGuid=if(
+        Role="access_target",
+        SrcGuid,
+        null()
+    )
+
+| eval TargetAccessSourceImage=if(
+        Role="access_target",
+        EffectiveSrcImage,
+        null()
+    )
+
+| eval TargetAccessSourceUser=if(
+        Role="access_target",
+        EffectiveSrcUser,
+        null()
+    )
+
+| eval TargetAccessSourceCommandLine=if(
+        Role="access_target",
+        EffectiveSrcCommandLine,
+        null()
+    )
+
+| eval TargetAccessTargetPID=if(
+        Role="access_target",
+        TgtPID,
+        null()
+    )
+
+| eval TargetAccessTargetGuid=if(
+        Role="access_target",
+        EffectiveTgtGuid,
+        null()
+    )
+
+| eval TargetAccessTargetImage=if(
+        Role="access_target",
+        EffectiveTgtImage,
+        null()
+    )
+
+| eval TargetAccessTargetUser=if(
+        Role="access_target",
+        EffectiveTgtUser,
+        null()
+    )
+
+| eval TargetAccessGranted=if(
+        Role="access_target",
+        AccessGranted,
+        null()
+    )
+
+| eval TargetAccessCallTrace=if(
+        Role="access_target",
+        AccessCallTrace,
+        null()
+    )
+
+
+| sort 0 Computer EntityKey _time
+
+
+| streamstats current=f
+
+    last(SelfPID) AS PriorSelfPID
+    last(SelfGuid) AS PriorSelfGuid
+    last(SelfImage) AS PriorSelfImage
+    last(SelfUser) AS PriorSelfUser
+    last(SelfCommandLine) AS PriorSelfCommandLine
+
+    last(SourceAccessTime) AS LastSourceAccessTime
+    last(SourceAccessSourcePID) AS LastSourceAccessSourcePID
+    last(SourceAccessSourceGuid) AS LastSourceAccessSourceGuid
+    last(SourceAccessSourceImage) AS LastSourceAccessSourceImage
+    last(SourceAccessSourceUser) AS LastSourceAccessSourceUser
+    last(SourceAccessSourceCommandLine) AS LastSourceAccessSourceCommandLine
+    last(SourceAccessTargetPID) AS LastSourceAccessTargetPID
+    last(SourceAccessTargetGuid) AS LastSourceAccessTargetGuid
+    last(SourceAccessTargetImage) AS LastSourceAccessTargetImage
+    last(SourceAccessTargetUser) AS LastSourceAccessTargetUser
+    last(SourceAccessGranted) AS LastSourceAccessGranted
+    last(SourceAccessCallTrace) AS LastSourceAccessCallTrace
+
+    last(TargetAccessTime) AS LastTargetAccessTime
+    last(TargetAccessSourcePID) AS LastTargetAccessSourcePID
+    last(TargetAccessSourceGuid) AS LastTargetAccessSourceGuid
+    last(TargetAccessSourceImage) AS LastTargetAccessSourceImage
+    last(TargetAccessSourceUser) AS LastTargetAccessSourceUser
+    last(TargetAccessSourceCommandLine) AS LastTargetAccessSourceCommandLine
+    last(TargetAccessTargetPID) AS LastTargetAccessTargetPID
+    last(TargetAccessTargetGuid) AS LastTargetAccessTargetGuid
+    last(TargetAccessTargetImage) AS LastTargetAccessTargetImage
+    last(TargetAccessTargetUser) AS LastTargetAccessTargetUser
+    last(TargetAccessGranted) AS LastTargetAccessGranted
+    last(TargetAccessCallTrace) AS LastTargetAccessCallTrace
+
+    BY Computer EntityKey
+
+
+| where Role="childref" OR Role="sec4688"
+
+
+| eval ChildCorrelationPID=case(
+        Role="childref",
+            ChildPID,
+
+        Role="sec4688",
+            SecNewPID
+    )
+
+| eval ChildKey=
+    Computer . "|" . tostring(ChildCorrelationPID)
+
+
+| sort 0 ChildKey _time
+
+
+| streamstats current=f
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                _time,
+                null()
+            )
+        )
+    ) AS PrevSecTime
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecCreatorPID,
+                null()
+            )
+        )
+    ) AS PrevSecCreatorPID
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecCreatorImage,
+                null()
+            )
+        )
+    ) AS PrevSecCreatorImage
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecCreatorUser,
+                null()
+            )
+        )
+    ) AS PrevSecCreatorUser
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecCreatorSID,
+                null()
+            )
+        )
+    ) AS PrevSecCreatorSID
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecTargetUser,
+                null()
+            )
+        )
+    ) AS PrevSecTargetUser
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecTargetSID,
+                null()
+            )
+        )
+    ) AS PrevSecTargetSID
+
+    BY ChildKey
+
+
+| sort 0 ChildKey -_time
+
+
+| streamstats current=f
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                _time,
+                null()
+            )
+        )
+    ) AS NextSecTime
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecCreatorPID,
+                null()
+            )
+        )
+    ) AS NextSecCreatorPID
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecCreatorImage,
+                null()
+            )
+        )
+    ) AS NextSecCreatorImage
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecCreatorUser,
+                null()
+            )
+        )
+    ) AS NextSecCreatorUser
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecCreatorSID,
+                null()
+            )
+        )
+    ) AS NextSecCreatorSID
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecTargetUser,
+                null()
+            )
+        )
+    ) AS NextSecTargetUser
+
+    last(
+        eval(
+            if(
+                Role="sec4688",
+                SecTargetSID,
+                null()
+            )
+        )
+    ) AS NextSecTargetSID
+
+    BY ChildKey
+
+
+| where Role="childref"
+
+
+| eval PrevSecDelta=if(
+        isnotnull(PrevSecTime),
+        abs(ChildTime-PrevSecTime),
+        999999
+    )
+
+| eval NextSecDelta=if(
+        isnotnull(NextSecTime),
+        abs(ChildTime-NextSecTime),
+        999999
+    )
+
+| eval UsePreviousSecurity=if(
+        PrevSecDelta<=NextSecDelta,
+        1,
+        0
+    )
+
+| eval Security4688Delta=if(
+        UsePreviousSecurity=1,
+        PrevSecDelta,
+        NextSecDelta
+    )
+
+| eval Security4688CreatorPID=if(
+        UsePreviousSecurity=1,
+        PrevSecCreatorPID,
+        NextSecCreatorPID
+    )
+
+| eval Security4688CreatorImage=if(
+        UsePreviousSecurity=1,
+        PrevSecCreatorImage,
+        NextSecCreatorImage
+    )
+
+| eval Security4688CreatorUser=if(
+        UsePreviousSecurity=1,
+        PrevSecCreatorUser,
+        NextSecCreatorUser
+    )
+
+| eval Security4688CreatorSID=if(
+        UsePreviousSecurity=1,
+        PrevSecCreatorSID,
+        NextSecCreatorSID
+    )
+
+| eval Security4688TargetUser=if(
+        UsePreviousSecurity=1,
+        PrevSecTargetUser,
+        NextSecTargetUser
+    )
+
+| eval Security4688TargetSID=if(
+        UsePreviousSecurity=1,
+        PrevSecTargetSID,
+        NextSecTargetSID
+    )
+
+| eval Security4688Matched=if(
+        Security4688Delta<=10,
+        1,
+        0
+    )
+
+
+| eval ChildIsSystem=if(
+        lower(ChildIntegrity)="system"
+        AND (
+            lower(ChildUser)="nt authority\\system"
+            OR match(
+                lower(ChildUser),
+                "\\\\system$"
+            )
+        ),
+        1,
+        0
+    )
+
+| where ChildIsSystem=1
+
+
+| eval ParentResolvedUser=coalesce(
+        ChildParentUser,
+        PriorSelfUser,
+        LastSourceAccessSourceUser
+    )
+
+| eval ParentResolvedImage=coalesce(
+        ChildParentImage,
+        PriorSelfImage,
+        LastSourceAccessSourceImage
+    )
+
+| eval ParentResolvedCommandLine=coalesce(
+        ChildParentCommandLine,
+        PriorSelfCommandLine,
+        LastSourceAccessSourceCommandLine
+    )
+
+| eval ParentResolvedGuid=coalesce(
+        ChildParentGuid,
+        PriorSelfGuid
+    )
+
+
+| eval DirectParentIsNonService=if(
+        isnotnull(ParentResolvedUser)
+        AND ParentResolvedUser!=""
+        AND lower(ParentResolvedUser)!="nt authority\\system"
+        AND lower(ParentResolvedUser)!="nt authority\\local service"
+        AND lower(ParentResolvedUser)!="nt authority\\network service",
+        1,
+        0
+    )
+
+
+| eval SourceAccessAge=if(
+        isnotnull(LastSourceAccessTime),
+        ChildTime-LastSourceAccessTime,
+        999999
+    )
+
+| eval SourceAccessTargetIsSystem=if(
+        lower(LastSourceAccessTargetUser)="nt authority\\system"
+        OR match(
+            lower(LastSourceAccessTargetUser),
+            "\\\\system$"
+        ),
+        1,
+        0
+    )
+
+| eval DirectParentAccessValid=if(
+        DirectParentIsNonService=1
+        AND SourceAccessAge>=0
+        AND SourceAccessAge<=120
+        AND LastSourceAccessSourcePID=ChildParentPID
+        AND SourceAccessTargetIsSystem=1
+        AND (
+            isnull(LastSourceAccessSourceUser)
+            OR LastSourceAccessSourceUser=""
+            OR lower(LastSourceAccessSourceUser)=lower(ParentResolvedUser)
+        ),
+        1,
+        0
+    )
+
+
+| eval TargetAccessAge=if(
+        isnotnull(LastTargetAccessTime),
+        ChildTime-LastTargetAccessTime,
+        999999
+    )
+
+| eval TargetAccessSourceIsNonService=if(
+        isnotnull(LastTargetAccessSourceUser)
+        AND LastTargetAccessSourceUser!=""
+        AND lower(LastTargetAccessSourceUser)!="nt authority\\system"
+        AND lower(LastTargetAccessSourceUser)!="nt authority\\local service"
+        AND lower(LastTargetAccessSourceUser)!="nt authority\\network service",
+        1,
+        0
+    )
+
+| eval TargetAccessTargetIsSystem=if(
+        lower(LastTargetAccessTargetUser)="nt authority\\system"
+        OR match(
+            lower(LastTargetAccessTargetUser),
+            "\\\\system$"
+        ),
+        1,
+        0
+    )
+
+| eval DonorParentAccessValid=if(
+        TargetAccessAge>=0
+        AND TargetAccessAge<=120
+        AND LastTargetAccessTargetPID=ChildParentPID
+        AND TargetAccessTargetIsSystem=1
+        AND TargetAccessSourceIsNonService=1
+        AND LastTargetAccessSourcePID!=ChildParentPID,
+        1,
+        0
+    )
+
+
+| eval Relationship=case(
+
+        DirectParentAccessValid=1,
+            "Direct Parent-Child Token Manipulation",
+
+        DonorParentAccessValid=1,
+            "Token Donor Reported As Child Parent",
+
+        DirectParentIsNonService=1,
+            "Direct Parent-Child SYSTEM Identity Transition",
+
+        true(),
+            null()
+    )
+
+| where isnotnull(Relationship)
+
+
+| eval ManipulatorPID=case(
+
+        DirectParentAccessValid=1,
+            tostring(ChildParentPID),
+
+        DonorParentAccessValid=1,
+            tostring(LastTargetAccessSourcePID),
+
+        DirectParentIsNonService=1,
+            tostring(ChildParentPID)
+    )
+
+| eval ManipulatorImage=case(
+
+        DirectParentAccessValid=1,
+            ParentResolvedImage,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessSourceImage,
+
+        DirectParentIsNonService=1,
+            ParentResolvedImage
+    )
+
+| eval ManipulatorUser=case(
+
+        DirectParentAccessValid=1,
+            ParentResolvedUser,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessSourceUser,
+
+        DirectParentIsNonService=1,
+            ParentResolvedUser
+    )
+
+| eval ManipulatorCommandLine=case(
+
+        DirectParentAccessValid=1,
+            ParentResolvedCommandLine,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessSourceCommandLine,
+
+        DirectParentIsNonService=1,
+            ParentResolvedCommandLine
+    )
+
+| eval ManipulatorProcessGuid=case(
+
+        DirectParentAccessValid=1,
+            ParentResolvedGuid,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessSourceGuid,
+
+        DirectParentIsNonService=1,
+            ParentResolvedGuid
+    )
+
+
+| eval TokenSourcePID=case(
+
+        DirectParentAccessValid=1,
+            tostring(LastSourceAccessTargetPID),
+
+        DonorParentAccessValid=1,
+            tostring(LastTargetAccessTargetPID),
+
+        true(),
+            ""
+    )
+
+| eval TokenSourceImage=case(
+
+        DirectParentAccessValid=1,
+            LastSourceAccessTargetImage,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessTargetImage,
+
+        true(),
+            ""
+    )
+
+| eval TokenSourceUser=case(
+
+        DirectParentAccessValid=1,
+            LastSourceAccessTargetUser,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessTargetUser,
+
+        true(),
+            ""
+    )
+
+| eval TokenSourceProcessGuid=case(
+
+        DirectParentAccessValid=1,
+            LastSourceAccessTargetGuid,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessTargetGuid,
+
+        true(),
+            ""
+    )
+
+| eval GrantedAccess=case(
+
+        DirectParentAccessValid=1,
+            LastSourceAccessGranted,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessGranted,
+
+        true(),
+            ""
+    )
+
+| eval AccessTime=case(
+
+        DirectParentAccessValid=1,
+            LastSourceAccessTime,
+
+        DonorParentAccessValid=1,
+            LastTargetAccessTime,
+
+        true(),
+            null()
+    )
+
+
+| eval ConfidenceScore=case(
+
+        DirectParentAccessValid=1,
+            90,
+
+        DonorParentAccessValid=1,
+            90,
+
+        DirectParentIsNonService=1,
+            50
+    )
+
+
+| eval Security4688SupportsTransition=if(
+        Security4688Matched=1
+        AND Security4688TargetSID="S-1-5-18"
+        AND Security4688CreatorSID!="S-1-5-18"
+        AND Security4688CreatorSID!="S-1-5-19"
+        AND Security4688CreatorSID!="S-1-5-20",
+        1,
+        0
+    )
+
+| eval ConfidenceScore=
+    ConfidenceScore
+    + if(
+        Security4688SupportsTransition=1,
+        10,
+        0
+    )
+
+| eval ConfidenceScore=if(
+        ConfidenceScore>100,
+        100,
+        ConfidenceScore
+    )
+
+
+| eval DetectionReasons=case(
+
+        Relationship="Direct Parent-Child Token Manipulation",
+
+            "SYSTEM child has direct non-service parent "
+            . ManipulatorImage
+            . " PID "
+            . ManipulatorPID
+            . "; same parent accessed SYSTEM token donor "
+            . TokenSourceImage
+            . " PID "
+            . TokenSourcePID
+            . " within 120 seconds before privileged child creation",
+
+        Relationship="Token Donor Reported As Child Parent",
+
+            "Non-service process "
+            . ManipulatorImage
+            . " PID "
+            . ManipulatorPID
+            . " accessed SYSTEM token donor "
+            . TokenSourceImage
+            . " PID "
+            . TokenSourcePID
+            . "; resulting SYSTEM process reports donor as parent",
+
+        true(),
+
+            "SYSTEM child was created directly by non-service process "
+            . ManipulatorImage
+            . " PID "
+            . ManipulatorPID
+            . "; matching Sysmon Event ID 10 token-donor evidence was not available"
+    )
+
+
+| where ConfidenceScore>=50
+
+| where ChildTime>=relative_time(now(), "-5m@m")
+
+
+| eval Time=strftime(
+        ChildTime,
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+| eval AccessTime=if(
+        isnotnull(AccessTime),
+        strftime(
+            AccessTime,
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        ""
+    )
+
+| eval Security4688CreatorPID=if(
+        Security4688Matched=1,
+        tostring(Security4688CreatorPID),
+        ""
+    )
+
+| eval Security4688CreatorImage=if(
+        Security4688Matched=1,
+        Security4688CreatorImage,
+        ""
+    )
+
+| eval Security4688CreatorUser=if(
+        Security4688Matched=1,
+        Security4688CreatorUser,
+        ""
+    )
+
+| eval Security4688CreatorSID=if(
+        Security4688Matched=1,
+        Security4688CreatorSID,
+        ""
+    )
+
+| eval Security4688TargetUser=if(
+        Security4688Matched=1,
+        Security4688TargetUser,
+        ""
+    )
+
+| eval Security4688TargetSID=if(
+        Security4688Matched=1,
+        Security4688TargetSID,
+        ""
+    )
+
+
+| rename
+    ChildPID AS NewProcessPID
+    ChildImage AS NewProcessImage
+    ChildCommandLine AS NewProcessCommandLine
+    ChildUser AS NewProcessUser
+    ChildIntegrity AS NewProcessIntegrity
+    ChildGuid AS NewProcessGuid
+
+    ChildParentPID AS ReportedParentPID
+    ChildParentImage AS ReportedParentImage
+    ChildParentGuid AS ReportedParentGuid
+
+
+| table
+    Time
+    Computer
+    ConfidenceScore
+    Relationship
+
+    ManipulatorPID
+    ManipulatorImage
+    ManipulatorUser
+    ManipulatorCommandLine
+    ManipulatorProcessGuid
+
+    TokenSourcePID
+    TokenSourceImage
+    TokenSourceUser
+    TokenSourceProcessGuid
+    GrantedAccess
+    AccessTime
+
+    NewProcessPID
+    NewProcessImage
+    NewProcessCommandLine
+    NewProcessUser
+    NewProcessIntegrity
+    NewProcessGuid
+
+    ReportedParentPID
+    ReportedParentImage
+    ReportedParentGuid
+
+    Security4688Matched
+    Security4688SupportsTransition
+    Security4688CreatorPID
+    Security4688CreatorImage
+    Security4688CreatorUser
+    Security4688CreatorSID
+    Security4688TargetUser
+    Security4688TargetSID
+
+    DetectionReasons
+
+| sort 0 -ConfidenceScore -Time
