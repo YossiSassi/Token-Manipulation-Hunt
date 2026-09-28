@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Hunt for Token Manipulation behavior with Sysmon & Security Events evidence.
 
@@ -15,7 +15,8 @@ The time window to correlate between the events. Unless process is suspended/spl
 The minimal suspicious score to filter results as output. Ranging between 0 to 100. Default is 60. Lower confidence value might produce False-Positives, yet uncover some other behavior.
 
 .NOTES
-Version: 1.0
+Version: 1.1 - Fixed a XML parsing issue with new function Remove-InvalidXml10Characters.
+v1.0 - Initial script
 Comments welcome to yossis@protonmail.com (1nTh35h311)
 #>
 param(
@@ -32,15 +33,69 @@ $SysmonLog = 'Microsoft-Windows-Sysmon/Operational'
 # Helpers
 # ============================================================
 
+function Remove-InvalidXml10Characters {
+    param(
+        [AllowNull()]
+        [string]$Text
+    )
+
+    if ($null -eq $Text) {
+        return $null
+    }
+
+    # XML 1.0 does not permit C0 control characters except TAB (0x09),
+    # LF (0x0A), and CR (0x0D). Some Sysmon metadata fields can contain
+    # these invalid bytes (for example FileVersion containing 0x01), which
+    # makes XmlDocument.LoadXml()/[xml] casts fail for an otherwise valid event.
+    return [regex]::Replace(
+        $Text,
+        '[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]',
+        ''
+    )
+}
+
+
 function Get-EventDataMap {
     param(
         [Parameter(Mandatory)]
         $Event
     )
 
-    [xml]$Xml = $Event.ToXml()
-
     $Map = @{}
+
+    try {
+        $RawXml = $Event.ToXml()
+    }
+    catch {
+        $Message = "Could not obtain XML for event RecordId {0}: {1}" -f $Event.RecordId, $_.Exception.Message
+        Write-Warning $Message
+        return $null
+    }
+
+    $Xml = New-Object System.Xml.XmlDocument
+
+    try {
+        # Do not cast directly with [xml] here. LoadXml() lets us catch a bad
+        # Sysmon field and retry after removing only XML-invalid characters.
+        $Xml.LoadXml($RawXml)
+    }
+    catch [System.Xml.XmlException] {
+
+        $SanitizedXml = Remove-InvalidXml10Characters -Text $RawXml
+
+        try {
+            $Xml = New-Object System.Xml.XmlDocument
+            $Xml.LoadXml($SanitizedXml)
+
+            $Message = "Sanitized XML-invalid control character(s) in event RecordId {0}, EventId {1}." -f $Event.RecordId, $Event.Id
+            Write-Verbose $Message
+        }
+        catch {
+            $Message = "Skipping event RecordId {0}, EventId {1}: XML could not be parsed even after sanitization. {2}" -f $Event.RecordId, $Event.Id, $_.Exception.Message
+            Write-Warning $Message
+            return $null
+        }
+    }
 
     foreach ($Item in @($Xml.Event.EventData.Data)) {
 
@@ -152,6 +207,7 @@ $SysmonProcesses = @(
     ForEach-Object {
 
         $D = Get-EventDataMap $_
+        if ($null -eq $D) { return }
 
         [PSCustomObject]@{
             Time              = $_.TimeCreated
@@ -189,6 +245,7 @@ $ProcessAccess = @(
     ForEach-Object {
 
         $D = Get-EventDataMap $_
+        if ($null -eq $D) { return }
 
         [PSCustomObject]@{
             Time              = $_.TimeCreated
@@ -226,6 +283,7 @@ $Security4688 = @(
     ForEach-Object {
 
         $D = Get-EventDataMap $_
+        if ($null -eq $D) { return }
 
         [PSCustomObject]@{
             Time =
@@ -280,6 +338,7 @@ $Security4703 = @(
     ForEach-Object {
 
         $D = Get-EventDataMap $_
+        if ($null -eq $D) { return }
 
         [PSCustomObject]@{
             Time =
